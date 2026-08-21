@@ -1,0 +1,11 @@
+services:
+  cafe_bot:
+    build: .
+    container_name: cafe_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
