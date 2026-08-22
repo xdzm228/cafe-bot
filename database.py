@@ -80,3 +80,30 @@ async def get_reservations(limit: int = 15):
             (limit,),
         )
         return await cursor.fetchall()
+
+
+async def get_reservation_dates() -> list[tuple[int, str]]:
+    """Повертає (id, date) для всіх бронювань — використовується для пошуку
+    прострочених записів, які можна видалити."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT id, date FROM reservations")
+        return await cursor.fetchall()
+
+
+async def delete_reservation(reservation_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("DELETE FROM reservations WHERE id = ?", (reservation_id,))
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def delete_reservations_by_ids(ids: list[int]) -> int:
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            f"DELETE FROM reservations WHERE id IN ({placeholders})", ids
+        )
+        await db.commit()
+        return cursor.rowcount
