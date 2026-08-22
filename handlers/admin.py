@@ -139,7 +139,7 @@ async def poll_options(message: Message, state: FSMContext, bot: Bot):
     question = data["question"]
     await state.clear()
 
-    # Неанонімне опитування — щоб потім можна було подивитись, хто що обрав
+
     campaign_id = await db.create_poll_campaign(question, options)
 
     user_ids = await db.get_all_user_ids()
@@ -154,12 +154,19 @@ async def poll_options(message: Message, state: FSMContext, bot: Bot):
                 options=options,
                 is_anonymous=False,
             )
-            await db.link_poll_message(sent_message.poll.id, campaign_id)
-            sent += 1
-        except Exception:
-            failed += 1
-        await asyncio.sleep(0.05)
 
+            await db.link_poll_message(
+                sent_message.poll.id,
+                campaign_id
+            )
+
+            sent += 1
+
+        except Exception as e:
+            failed += 1
+            print(f"❌ Ошибка отправки опроса пользователю {uid}: {e}")
+
+        await asyncio.sleep(0.05)
     await status.edit_text(
         f"✅ Опитування #{campaign_id} розіслано.\n"
         f"Надіслано: {sent}\nНе доставлено: {failed}\n\n"
