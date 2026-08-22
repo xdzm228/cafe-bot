@@ -1,11 +1,18 @@
 import asyncio
+import json
 from datetime import datetime
 
 from aiogram import Router, Bot, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    PollAnswer,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 
 import database as db
 from config import ADMIN_IDS
@@ -53,7 +60,8 @@ async def cmd_admin_help(message: Message):
         "🛠 Адмін-панель\n\n"
         f"Користувачів у базі: {count}\n\n"
         "/broadcast — розіслати новину/повідомлення всім\n"
-        "/poll — створити та розіслати опитування\n"
+        "/poll — створити та розіслати опитування (неанонімне)\n"
+        "/poll_results [номер] — переглянути список опитувань або результати конкретного\n"
         "/reservations — останні бронювання столиків (з кнопкою видалення)\n"
         "/clear_past — видалити всі прострочені бронювання одним махом\n"
         "/cancel — скасувати поточну дію"
@@ -131,19 +139,98 @@ async def poll_options(message: Message, state: FSMContext, bot: Bot):
     question = data["question"]
     await state.clear()
 
+    # Неанонімне опитування — щоб потім можна було подивитись, хто що обрав
+    campaign_id = await db.create_poll_campaign(question, options)
+
     user_ids = await db.get_all_user_ids()
     sent, failed = 0, 0
     status = await message.answer(f"Розсилаю опитування {len(user_ids)} користувачам...")
 
     for uid in user_ids:
         try:
-            await bot.send_poll(chat_id=uid, question=question, options=options, is_anonymous=True)
+            sent_message = await bot.send_poll(
+                chat_id=uid,
+                question=question,
+                options=options,
+                is_anonymous=False,
+            )
+            await db.link_poll_message(sent_message.poll.id, campaign_id)
             sent += 1
         except Exception:
             failed += 1
         await asyncio.sleep(0.05)
 
-    await status.edit_text(f"✅ Опитування розіслано.\nНадіслано: {sent}\nНе доставлено: {failed}")
+    await status.edit_text(
+        f"✅ Опитування #{campaign_id} розіслано.\n"
+        f"Надіслано: {sent}\nНе доставлено: {failed}\n\n"
+        f"Результати дивіться командою: /poll_results {campaign_id}"
+    )
+
+
+@router.poll_answer()
+async def handle_poll_answer(poll_answer: PollAnswer):
+    campaign_id = await db.get_campaign_id_by_poll(poll_answer.poll_id)
+    if campaign_id is None:
+        # Опитування створене не через цього бота, або запис про нього загубився
+        return
+
+    user = poll_answer.user
+    display = user.full_name
+    if user.username:
+        display += f" (@{user.username})"
+
+    await db.save_poll_answer(campaign_id, user.id, display, poll_answer.option_ids)
+
+
+@router.message(Command("poll_results"))
+async def cmd_poll_results(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return
+
+    if not command.args:
+        campaigns = await db.get_poll_campaigns(limit=10)
+        if not campaigns:
+            await message.answer("Опитувань поки не було.")
+            return
+
+        text = "📊 Останні опитування:\n\n"
+        for cid, question, answers in campaigns:
+            text += f"#{cid} — {question} (відповіли: {answers})\n"
+        text += "\nЩоб побачити деталі: /poll_results <номер>"
+        await message.answer(text)
+        return
+
+    try:
+        campaign_id = int(command.args.strip())
+    except ValueError:
+        await message.answer("Вкажіть номер опитування цифрою, наприклад /poll_results 3")
+        return
+
+    campaign = await db.get_poll_campaign(campaign_id)
+    if not campaign:
+        await message.answer("Опитування з таким номером не знайдено.")
+        return
+
+    _, question, options_json = campaign
+    options = json.loads(options_json)
+    answers = await db.get_poll_answers(campaign_id)
+
+    voters_by_option: dict[int, list[str]] = {i: [] for i in range(len(options))}
+    for user_id, user_display, option_ids_json in answers:
+        for opt_id in json.loads(option_ids_json):
+            if opt_id in voters_by_option:
+                voters_by_option[opt_id].append(user_display or str(user_id))
+
+    text = f"📊 Опитування #{campaign_id}\n«{question}»\n\n"
+    for i, option in enumerate(options):
+        voters = voters_by_option.get(i, [])
+        text += f"{i + 1}) {option} — {len(voters)}\n"
+        for voter in voters:
+            text += f"   • {voter}\n"
+        text += "\n"
+    text += f"Усього проголосувало: {len(answers)}"
+
+    await message.answer(text)
 
 
 @router.message(Command("reservations"))
